@@ -131,19 +131,7 @@ GROUP BY Customer_City, Customer_Country
 ORDER BY Total_Revenue DESC
 ;
 
--- 11 Customer Churn by Location
-SELECT 
-    Customer_City AS City, 
-    Customer_Country AS Country, 
-    COUNT(Customer_ID) AS Total_Customers, 
-    COUNT(CASE WHEN Last_Rental_Date < DATE_SUB(CURDATE(), INTERVAL 6 MONTH) THEN 1 END) AS Churned_Customers,
-    ROUND((COUNT(CASE WHEN Last_Rental_Date < DATE_SUB(CURDATE(), INTERVAL 6 MONTH) THEN 1 END) / COUNT(Customer_ID)) * 100, 2) AS Churn_Rate_Percentage
-FROM customer_revenue_summary
-GROUP BY Customer_City, Customer_Country
-ORDER BY Churn_Rate_Percentage DESC
-;
-
--- 12 Average Spending Per Customer by Country
+-- 11 Average Spending Per Customer by Country
 SELECT 
     Customer_Country AS Country, 
     COUNT(Customer_ID) AS Total_Customers, 
