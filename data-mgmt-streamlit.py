@@ -2,7 +2,6 @@
 import os
 import re
 from pathlib import Path
-
 import pandas as pd
 import streamlit as st
 
@@ -21,23 +20,12 @@ DATA_DIR = REPO_ROOT / "data"            # expects q1.csv ... qN.csv
 SQL_FILE = REPO_ROOT / "queries_shan.sql"
 
 # --------- Helpers ---------
-# Accepts any of:
-#   -- Query 1: Title
-#   -- [Query 1]: Title
-#   -- [Query 1] Title
 SQL_BLOCK_RE = re.compile(
     r"""^\s*--\s*\[?\s*Query\s*(?P<num>\d+)\s*\]?\s*:?\s*(?P<title>.*)\s*$""",
     re.IGNORECASE | re.MULTILINE,
 )
 
 def parse_sql_blocks(sql_text: str):
-    """
-    Returns ordered list of dicts: {num:int, title:str, body:str}
-    Headers supported:
-      -- Query 1: Title
-      -- [Query 1]: Title
-      -- [Query 1] Title
-    """
     headers = [(m.start(), m.end(), int(m.group("num")), (m.group("title") or "").strip())
                for m in SQL_BLOCK_RE.finditer(sql_text)]
     blocks = []
@@ -56,7 +44,6 @@ def load_sql_blocks(sql_path: Path):
     return parse_sql_blocks(text)
 
 def _dedupe_columns(cols):
-    """Ensure unique column names (prevents Altair/Streamlit errors)."""
     seen = {}
     out = []
     for c in cols:
@@ -88,7 +75,6 @@ def is_numeric(series: pd.Series) -> bool:
     return pd.api.types.is_numeric_dtype(series)
 
 def safe_number_slider(label, min_val, max_val, value):
-    """Avoid Streamlit slider crash when min == max."""
     if pd.isna(min_val) or pd.isna(max_val):
         st.info(f"{label}: no numeric data to filter.")
         return value
@@ -100,9 +86,6 @@ def safe_number_slider(label, min_val, max_val, value):
 # --------- Load SQL metadata ---------
 sql_blocks = load_sql_blocks(SQL_FILE)
 
-# If no blocks were parsed, fall back to generic names for q1..qN present
-fallback_blocks = []
-
 # Build available queries based on CSV files present
 available = []
 if DATA_DIR.exists():
@@ -111,7 +94,6 @@ if DATA_DIR.exists():
             num = int(re.sub(r"\D", "", f.stem))
         except Exception:
             continue
-        # find block for this num
         blk = next((b for b in sql_blocks if b["num"] == num), None)
         title = (blk["title"] if blk and blk.get("title") else f"Query {num}")
         body = (blk["body"] if blk and blk.get("body") else "")
@@ -132,7 +114,8 @@ with st.sidebar:
     picked = available[labels.index(pick_label)]
 
     st.markdown("---")
-    st.caption("Use the controls below to filter and visualize the selected query.")
+    # was: "Use the controls below..." (confusing in sidebar)
+    st.caption("Controls are in the main panel: search, filters, chart, SQL & downloads.")
 
 # --------- Load chosen CSV ---------
 df = load_csv(picked["csv"])
@@ -152,11 +135,11 @@ with c4:
 
 df_filtered = filter_df(df, search)
 
-# --------- Numeric filters (optional, dynamic) ---------
+# --------- Numeric filters ---------
 st.markdown("#### Quick Filters")
 num_cols = [c for c in df_filtered.columns if is_numeric(df_filtered[c])]
 if num_cols:
-    with st.expander("Numeric range filters (optional)"):
+    with st.expander("Numeric range filters"):
         for col in num_cols:
             ser = pd.to_numeric(df_filtered[col], errors="coerce")
             col_min, col_max = float(ser.min()), float(ser.max())
@@ -187,7 +170,6 @@ with chart_cols_left:
         st.info("No numeric columns available for Y-axis.")
         y_col = None
     else:
-        # prefer common revenue-ish columns, else first numeric
         pref = {"total_revenue", "revenue", "amount", "avg_spending_per_rental", "total_late_fees"}
         idx = 0
         for i, c in enumerate(y_candidates):
@@ -198,18 +180,21 @@ with chart_cols_left:
 
 with chart_cols_right:
     chart_type = st.selectbox("Chart type", ["Bar", "Line", "Area", "Scatter"])
-    color_col = st.selectbox(
-        "Color by (optional)",
-        options=["(none)"] + [c for c in df_filtered.columns if c != x_col],
-        index=0
-    )
+    color_options = ["(none)"] + [c for c in df_filtered.columns if c != x_col]
+    color_col = st.selectbox("Color by (optional)", options=color_options, index=0)
 
 if y_col:
     try:
         import altair as alt
-        data = df_filtered[[x_col, y_col] + ([] if color_col == "(none)" else [color_col])].copy()
 
-        # keep ordering sensible for categorical x; limit cardinality
+        # Build a unique list of required columns (avoid duplicate names)
+        needed_cols = [x_col, y_col]
+        if color_col != "(none)" and color_col not in needed_cols:
+            needed_cols.append(color_col)
+
+        data = df_filtered[needed_cols].copy()
+
+        # Limit x cardinality for readability if x is categorical
         if not is_numeric(data[x_col]) and data[x_col].nunique() > 50:
             top_vals = data[x_col].value_counts().nlargest(50).index
             data = data[data[x_col].isin(top_vals)]
@@ -226,7 +211,7 @@ if y_col:
         enc = mark.encode(
             x=alt.X(x_col, sort=None),
             y=alt.Y(y_col),
-            tooltip=list(data.columns)
+            tooltip=list(data.columns),
         )
         if color_col != "(none)":
             enc = enc.encode(color=color_col)
