@@ -43,7 +43,6 @@ GROUP BY c.customer_id, Customer_Name, ci.city, co.country;
 
 SELECT * FROM customer_revenue_summary;
 
-
 -- QUERIES
 
 -- 1 Top 10 Revenue-Generating Customers
@@ -109,7 +108,6 @@ SELECT DATE_FORMAT(First_Rental_Date, '%Y-%m') AS Customer_Cohort,
 FROM customer_revenue_summary
 GROUP BY Customer_Cohort
 ORDER BY Customer_Cohort;
-
 
 -- 9 Revenue by Country
 SELECT 
