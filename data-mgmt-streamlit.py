@@ -60,27 +60,47 @@ def filter_df(df: pd.DataFrame, search: str) -> pd.DataFrame:
     if not s:
         return df
     # search across all columns as strings (safe for mixed dtypes)
-    mask = df.apply(lambda row: row.astype(str).str.lower().str.contains(s, na=False).any(), axis=1)
-    return df[mask]
+    return df[df.apply(lambda row: row.astype(str).str.lower().str.contains(s, na=False).any(), axis=1)]
 
 def is_numeric(series: pd.Series) -> bool:
     return pd.api.types.is_numeric_dtype(series)
 
-def numeric_range_slider(df: pd.DataFrame, col: str):
-    """Render a range slider for a numeric column; returns (min,max) or None if skipped."""
-    series = pd.to_numeric(df[col], errors="coerce")
-    col_min = series.min()
-    col_max = series.max()
-    # Hide sliders for single-value or all-NaN columns
-    if pd.isna(col_min) or pd.isna(col_max) or col_min == col_max:
-        return None
-    return st.slider(f"{col} range", float(col_min), float(col_max), (float(col_min), float(col_max)))
+def make_unique_cols(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Ensure column names are unique (Altair requirement).
+    Appends suffixes like '.1', '.2' for duplicates.
+    """
+    seen = {}
+    new_cols = []
+    for c in df.columns:
+        if c not in seen:
+            seen[c] = 0
+            new_cols.append(c)
+        else:
+            seen[c] += 1
+            new_cols.append(f"{c}.{seen[c]}")
+    df = df.copy()
+    df.columns = new_cols
+    return df
+
+def safe_number_slider(label, min_val, max_val, value):
+    """Avoid Streamlit slider crash when min == max."""
+    if pd.isna(min_val) or pd.isna(max_val):
+        st.info(f"{label}: no numeric data to filter.")
+        return value
+    if min_val == max_val:
+        st.info(f"{label}: single value ({round(float(min_val), 4)}) — no range filter applied.")
+        return (min_val, max_val)
+    return st.slider(label, float(min_val), float(max_val), (float(value[0]), float(value[1])))
 
 # --------- Load SQL metadata ---------
 sql_blocks = load_sql_blocks(SQL_FILE)
 
-# If no blocks were parsed, fall back to generic names for q1..q99 (based on files present)
-fallback_blocks = [{"num": i, "title": f"Query {i}", "body": ""} for i in range(1, 100)]
+# If no blocks were parsed, fall back to generic names for q1..q99
+fallback_blocks = [
+    {"num": i, "title": f"Query {i}", "body": ""}
+    for i in range(1, 100)
+]
 
 # Build available queries based on CSV files present
 available = []
@@ -96,15 +116,18 @@ if not available:
     )
     st.stop()
 
-# --------- Sidebar: query picker ---------
+# --------- Sidebar: query picker only ---------
 with st.sidebar:
     st.subheader("Select Query")
     options = {f"Query {q['num']}: {q['title']}": q for q in available}
     pick_label = st.selectbox("Query output", list(options.keys()))
     picked = options[pick_label]
+    st.markdown("---")
 
 # --------- Load chosen CSV ---------
-df = load_csv(picked["csv"])
+df_raw = load_csv(picked["csv"])
+df = make_unique_cols(df_raw)
+
 st.markdown(f"### {pick_label}")
 
 # --------- Top info row ---------
@@ -120,21 +143,41 @@ with c4:
 
 df_filtered = filter_df(df, search)
 
-# --------- Numeric filters (dynamic) ---------
-st.markdown("#### Numeric Range Filters")
-num_cols = [c for c in df_filtered.columns if is_numeric(df_filtered[c])]
-at_least_one_slider = False
-if num_cols:
-    with st.expander("Show filters"):
-        for col in num_cols:
-            rng = numeric_range_slider(df_filtered, col)
-            if rng is None:
-                continue  # hide single-value / non-numeric columns
-            at_least_one_slider = True
-            series = pd.to_numeric(df_filtered[col], errors="coerce")
-            df_filtered = df_filtered[(series >= rng[0]) & (series <= rng[1])]
-if num_cols and not at_least_one_slider:
-    st.info("No numeric columns with a usable range to filter.")
+# --------- Numeric filters ---------
+st.markdown("#### Numeric range filters")
+num_cols_all = [c for c in df_filtered.columns if is_numeric(df_filtered[c])]
+
+if not num_cols_all:
+    st.info("No numeric columns found — range filters aren’t available for this query.")
+else:
+    # Determine which numeric columns actually have a usable range
+    usable_cols = []
+    single_value_cols = []
+    for col in num_cols_all:
+        col_min = pd.to_numeric(df_filtered[col], errors="coerce").min()
+        col_max = pd.to_numeric(df_filtered[col], errors="coerce").max()
+        if pd.isna(col_min) or pd.isna(col_max):
+            single_value_cols.append(col)
+        elif col_min == col_max:
+            single_value_cols.append(col)
+        else:
+            usable_cols.append((col, col_min, col_max))
+
+    if not usable_cols:
+        st.info("Numeric columns exist, but each has a single repeated value — range filters are not applicable.")
+    else:
+        with st.expander("Show filters"):
+            for col, col_min, col_max in usable_cols:
+                chosen_min, chosen_max = safe_number_slider(
+                    f"{col} range",
+                    col_min,
+                    col_max,
+                    (col_min, col_max),
+                )
+                df_filtered = df_filtered[
+                    (pd.to_numeric(df_filtered[col], errors="coerce") >= chosen_min) &
+                    (pd.to_numeric(df_filtered[col], errors="coerce") <= chosen_max)
+                ]
 
 # --------- Data preview ---------
 st.markdown("#### Data Preview")
@@ -146,14 +189,17 @@ chart_cols_left, chart_cols_right = st.columns([3, 2])
 
 with chart_cols_left:
     x_col = st.selectbox("X-axis", options=list(df_filtered.columns), index=0)
+
     y_candidates = [c for c in df_filtered.columns if is_numeric(df_filtered[c])]
     if not y_candidates:
         st.info("No numeric columns available for Y-axis.")
         y_col = None
     else:
+        # Prefer revenue-ish columns by default
         default_y_idx = 0
+        preferred_order = ("total_revenue", "revenue", "amount", "avg_spending_per_rental", "total_late_fees")
         for i, c in enumerate(y_candidates):
-            if c.lower() in ("total_revenue", "revenue", "amount", "avg_spending_per_rental", "total_late_fees"):
+            if c.lower() in preferred_order:
                 default_y_idx = i
                 break
         y_col = st.selectbox("Y-axis (numeric)", options=y_candidates, index=default_y_idx)
@@ -163,64 +209,46 @@ with chart_cols_right:
     color_choices = ["(none)"] + [c for c in df_filtered.columns]
     color_col = st.selectbox("Color by (optional)", options=color_choices, index=0)
 
-# --------- Render chart ---------
+# Guard against using the same column for both Y and Color (or other ambiguous combos)
+if y_col and color_col != "(none)" and color_col == y_col:
+    st.warning("Color column matches Y-axis; color encoding disabled to avoid conflicts.")
+    color_col = "(none)"
+
+# Build chart
 if y_col:
     try:
         import altair as alt
+        needed_cols = [x_col, y_col] + ([] if color_col == "(none)" else [color_col])
+        data = df_filtered[needed_cols].copy()
 
-        # Build chart dataframe including only selected columns
-        cols = [x_col, y_col]
-        if color_col != "(none)":
-            cols.append(color_col)
-
-        data = df_filtered[cols].copy()
-
-        # De-duplicate column names if user picked the same one twice
-        # (Altair requires unique field names)
-        new_cols = []
-        seen = {}
-        for c in data.columns:
-            if c not in seen:
-                seen[c] = 1
-                new_cols.append(c)
-            else:
-                seen[c] += 1
-                new_cols.append(f"{c}__{seen[c]}")
-        data.columns = new_cols
-
-        # Map back to renamed columns
-        x_name = new_cols[0]
-        y_name = new_cols[1]
-        color_name = None
-        if color_col != "(none)":
-            color_name = new_cols[2]
-
-        # Limit cardinality for categorical x
-        if not is_numeric(data[x_name]):
+        # Keep x reasonable if it's categorical with huge cardinality
+        if not is_numeric(data[x_col]):
             top_n = 50
-            if data[x_name].nunique(dropna=True) > top_n:
-                top_vals = data[x_name].value_counts(dropna=False).nlargest(top_n).index
-                data = data[data[x_name].isin(top_vals)]
+            if len(data[x_col].unique()) > top_n:
+                top_vals = data[x_col].value_counts().nlargest(top_n).index
+                data = data[data[x_col].isin(top_vals)]
 
+        # Altair mark selection
         mark = (
             alt.Chart(data).mark_bar()
-            if chart_type == "Bar" else
-            alt.Chart(data).mark_line()
-            if chart_type == "Line" else
-            alt.Chart(data).mark_area()
-            if chart_type == "Area" else
-            alt.Chart(data).mark_circle(size=60)
+            if chart_type == "Bar"
+            else alt.Chart(data).mark_line()
+            if chart_type == "Line"
+            else alt.Chart(data).mark_area()
+            if chart_type == "Area"
+            else alt.Chart(data).mark_circle(size=60)
         )
 
         enc = mark.encode(
-            x=alt.X(x_name, sort=None),
-            y=alt.Y(y_name),
+            x=alt.X(x_col, sort=None),
+            y=alt.Y(y_col),
             tooltip=list(data.columns),
         )
-        if color_name:
-            enc = enc.encode(color=color_name)
+        if color_col != "(none)":
+            enc = enc.encode(color=color_col)
 
         st.altair_chart(enc.properties(height=380, width="container"), use_container_width=True)
+
     except Exception as e:
         st.warning(f"Chart could not be rendered: {e}")
 
