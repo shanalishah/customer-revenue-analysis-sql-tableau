@@ -2,6 +2,7 @@
 import os
 import re
 from pathlib import Path
+
 import pandas as pd
 import streamlit as st
 
@@ -16,23 +17,28 @@ st.caption("Browse query outputs, filter data, view SQL, and generate quick inte
 
 # --------- Paths ---------
 REPO_ROOT = Path(__file__).parent if "__file__" in globals() else Path(".")
-DATA_DIR = REPO_ROOT / "data"            # expects q1.csv ... qN.csv
+DATA_DIR = REPO_ROOT / "data"            # expects q1.csv ... q11.csv
 SQL_FILE = REPO_ROOT / "queries_shan.sql"
 
 # --------- Helpers ---------
 SQL_BLOCK_RE = re.compile(
-    r"""^\s*--\s*\[?\s*Query\s*(?P<num>\d+)\s*\]?\s*:?\s*(?P<title>.*)\s*$""",
-    re.IGNORECASE | re.MULTILINE,
+    r"""--\s*Query\s*(?P<num>\d+)\s*:\s*(?P<title>.+?)\n(?P<body>.*?)(?=(\n--\s*Query\s*\d+\s*:)|\Z)""",
+    re.IGNORECASE | re.DOTALL,
 )
 
 def parse_sql_blocks(sql_text: str):
-    headers = [(m.start(), m.end(), int(m.group("num")), (m.group("title") or "").strip())
-               for m in SQL_BLOCK_RE.finditer(sql_text)]
+    """
+    Returns ordered list of dicts: {num:int, title:str, body:str}
+    Requires headers like:
+      -- Query 1: Top 10 Revenue-Generating Customers
+      SELECT ...
+    """
     blocks = []
-    for i, (s, e, num, title) in enumerate(headers):
-        body_end = headers[i + 1][0] if i + 1 < len(headers) else len(sql_text)
-        body = sql_text[e:body_end].strip()
-        blocks.append({"num": num, "title": title or f"Query {num}", "body": body})
+    for m in SQL_BLOCK_RE.finditer(sql_text):
+        num = int(m.group("num"))
+        title = m.group("title").strip()
+        body = m.group("body").strip()
+        blocks.append({"num": num, "title": title, "body": body})
     blocks.sort(key=lambda x: x["num"])
     return blocks
 
@@ -43,25 +49,9 @@ def load_sql_blocks(sql_path: Path):
     text = sql_path.read_text(encoding="utf-8", errors="ignore")
     return parse_sql_blocks(text)
 
-def _dedupe_columns(cols):
-    seen = {}
-    out = []
-    for c in cols:
-        name = str(c)
-        if name not in seen:
-            seen[name] = 1
-            out.append(name)
-        else:
-            seen[name] += 1
-            out.append(f"{name} ({seen[name]})")
-    return out
-
 @st.cache_data(show_spinner=False)
 def load_csv(path: Path):
-    df = pd.read_csv(path, low_memory=False)
-    if df.columns.duplicated().any():
-        df.columns = _dedupe_columns(df.columns)
-    return df
+    return pd.read_csv(path, low_memory=False)
 
 def filter_df(df: pd.DataFrame, search: str) -> pd.DataFrame:
     if not search:
@@ -74,30 +64,31 @@ def filter_df(df: pd.DataFrame, search: str) -> pd.DataFrame:
 def is_numeric(series: pd.Series) -> bool:
     return pd.api.types.is_numeric_dtype(series)
 
+def is_boolean(series: pd.Series) -> bool:
+    return pd.api.types.is_bool_dtype(series)
+
 def safe_number_slider(label, min_val, max_val, value):
+    """Avoid Streamlit slider crash when min == max."""
     if pd.isna(min_val) or pd.isna(max_val):
         st.info(f"{label}: no numeric data to filter.")
         return value
-    if float(min_val) == float(max_val):
+    if min_val == max_val:
         st.info(f"{label}: single value ({min_val}) — no range filter applied.")
-        return (float(min_val), float(max_val))
+        return (min_val, max_val)
     return st.slider(label, float(min_val), float(max_val), (float(value[0]), float(value[1])))
 
 # --------- Load SQL metadata ---------
 sql_blocks = load_sql_blocks(SQL_FILE)
 
+# Fallback names for q1..q99 if no SQL file or headers
+fallback_blocks = [{"num": i, "title": f"Query {i}", "body": ""} for i in range(1, 100)]
+
 # Build available queries based on CSV files present
 available = []
-if DATA_DIR.exists():
-    for f in sorted(DATA_DIR.glob("q*.csv"), key=lambda p: int(re.sub(r"\D", "", p.stem) or 0)):
-        try:
-            num = int(re.sub(r"\D", "", f.stem))
-        except Exception:
-            continue
-        blk = next((b for b in sql_blocks if b["num"] == num), None)
-        title = (blk["title"] if blk and blk.get("title") else f"Query {num}")
-        body = (blk["body"] if blk and blk.get("body") else "")
-        available.append({"num": num, "title": title, "csv": f, "sql": body})
+for blk in (sql_blocks if sql_blocks else fallback_blocks):
+    csv_path = DATA_DIR / f"q{blk['num']}.csv"
+    if csv_path.exists():
+        available.append({"num": blk["num"], "title": blk["title"], "csv": csv_path, "sql": blk["body"]})
 
 if not available:
     st.error(
@@ -109,13 +100,9 @@ if not available:
 # --------- Sidebar ---------
 with st.sidebar:
     st.subheader("Select Query")
-    labels = [f"Query {q['num']}: {q['title']}" for q in available]
-    pick_label = st.selectbox("Query output", labels)
-    picked = available[labels.index(pick_label)]
-
-    st.markdown("---")
-    # was: "Use the controls below..." (confusing in sidebar)
-    st.caption("Controls are in the main panel: search, filters, chart, SQL & downloads.")
+    options = {f"Query {q['num']}: {q['title']}": q for q in available}
+    pick_label = st.selectbox("Query output", list(options.keys()))
+    picked = options[pick_label]
 
 # --------- Load chosen CSV ---------
 df = load_csv(picked["csv"])
@@ -129,20 +116,19 @@ with c2:
     st.metric("Columns", f"{df.shape[1]:,}")
 with c3:
     st.metric("File", picked["csv"].name)
-
 with c4:
     search = st.text_input("Search across all columns", placeholder="Type to filter…")
 
 df_filtered = filter_df(df, search)
 
 # --------- Numeric filters ---------
-st.markdown("#### Quick Filters")
+st.markdown("#### Numeric range filters")
 num_cols = [c for c in df_filtered.columns if is_numeric(df_filtered[c])]
 if num_cols:
-    with st.expander("Numeric range filters"):
+    with st.expander("Adjust numeric ranges"):
         for col in num_cols:
-            ser = pd.to_numeric(df_filtered[col], errors="coerce")
-            col_min, col_max = float(ser.min()), float(ser.max())
+            col_min = pd.to_numeric(df_filtered[col], errors="coerce").min()
+            col_max = pd.to_numeric(df_filtered[col], errors="coerce").max()
             chosen_min, chosen_max = safe_number_slider(
                 f"{col} range",
                 col_min,
@@ -150,8 +136,10 @@ if num_cols:
                 (col_min, col_max),
             )
             if col_min != col_max:
-                ser2 = pd.to_numeric(df_filtered[col], errors="coerce")
-                df_filtered = df_filtered[(ser2 >= chosen_min) & (ser2 <= chosen_max)]
+                df_filtered = df_filtered[
+                    (pd.to_numeric(df_filtered[col], errors="coerce") >= chosen_min) &
+                    (pd.to_numeric(df_filtered[col], errors="coerce") <= chosen_max)
+                ]
 else:
     st.info("No numeric columns detected for range filtering.")
 
@@ -170,49 +158,69 @@ with chart_cols_left:
         st.info("No numeric columns available for Y-axis.")
         y_col = None
     else:
-        pref = {"total_revenue", "revenue", "amount", "avg_spending_per_rental", "total_late_fees"}
-        idx = 0
+        default_y_idx = 0
         for i, c in enumerate(y_candidates):
-            if c.lower() in pref:
-                idx = i
+            if c.lower() in ("total_revenue", "revenue", "amount", "avg_spending_per_rental", "total_late_fees"):
+                default_y_idx = i
                 break
-        y_col = st.selectbox("Y-axis (numeric)", options=y_candidates, index=idx)
+        y_col = st.selectbox("Y-axis (numeric)", options=y_candidates, index=default_y_idx)
 
 with chart_cols_right:
     chart_type = st.selectbox("Chart type", ["Bar", "Line", "Area", "Scatter"])
-    color_options = ["(none)"] + [c for c in df_filtered.columns if c != x_col]
-    color_col = st.selectbox("Color by (optional)", options=color_options, index=0)
+    color_col = st.selectbox(
+        "Color by (optional)",
+        options=["(none)"] + [c for c in df_filtered.columns if c != x_col],
+        index=0
+    )
 
 if y_col:
     try:
         import altair as alt
 
-        # Build a unique list of required columns (avoid duplicate names)
-        needed_cols = [x_col, y_col]
-        if color_col != "(none)" and color_col not in needed_cols:
-            needed_cols.append(color_col)
+        # Build a unique column list for the plotting dataframe (avoid duplicates)
+        cols = [x_col, y_col]
+        if color_col != "(none)" and color_col not in cols:
+            cols.append(color_col)
+        # Deduplicate while preserving order
+        cols = list(dict.fromkeys(cols))
 
-        data = df_filtered[needed_cols].copy()
+        data = df_filtered[cols].copy()
 
-        # Limit x cardinality for readability if x is categorical
-        if not is_numeric(data[x_col]) and data[x_col].nunique() > 50:
-            top_vals = data[x_col].value_counts().nlargest(50).index
-            data = data[data[x_col].isin(top_vals)]
+        # Convert boolean columns to strings to avoid ambiguous truth-value errors
+        for c in data.columns:
+            if is_boolean(data[c]):
+                data[c] = data[c].astype(str)
 
-        if chart_type == "Bar":
-            mark = alt.Chart(data).mark_bar()
-        elif chart_type == "Line":
-            mark = alt.Chart(data).mark_line(point=True)
-        elif chart_type == "Area":
-            mark = alt.Chart(data).mark_area()
+        # Keep ordering sensible for categorical x; limit cardinality
+        if not is_numeric(data[x_col]):
+            top_n = 50
+            if data[x_col].nunique(dropna=True) > top_n:
+                top_vals = data[x_col].value_counts(dropna=True).nlargest(top_n).index
+                data = data[data[x_col].isin(top_vals)]
+
+        mark = (
+            "bar" if chart_type == "Bar"
+            else "line" if chart_type == "Line"
+            else "area" if chart_type == "Area"
+            else "point"
+        )
+
+        chart = alt.Chart(data)
+        if mark == "bar":
+            chart = chart.mark_bar()
+        elif mark == "line":
+            chart = chart.mark_line()
+        elif mark == "area":
+            chart = chart.mark_area()
         else:
-            mark = alt.Chart(data).mark_circle(size=60)
+            chart = chart.mark_circle(size=60)
 
-        enc = mark.encode(
+        enc = chart.encode(
             x=alt.X(x_col, sort=None),
             y=alt.Y(y_col),
             tooltip=list(data.columns),
         )
+
         if color_col != "(none)":
             enc = enc.encode(color=color_col)
 
@@ -222,7 +230,7 @@ if y_col:
 
 # --------- SQL Viewer ---------
 with st.expander("View SQL for this query"):
-    sql_body = (picked.get("sql") or "").strip()
+    sql_body = picked["sql"].strip()
     if sql_body:
         sql_body = re.sub(r"\n{3,}", "\n\n", sql_body)
         st.code(sql_body, language="sql")
