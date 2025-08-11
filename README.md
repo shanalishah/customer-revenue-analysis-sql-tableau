@@ -5,7 +5,7 @@ This project analyzes customer behavior and revenue trends for a **DVD rental co
 It includes:
 - A MySQL analytical view (`customer_revenue_summary`) aggregating rentals, revenue, fees, and geography.
 - Tableau visuals for executive insights.
-- An interactive **Streamlit** app to browse query outputs, filter, chart, and download data.
+- An interactive **Streamlit** app to browse query outputs, filter, chart, and download data: https://customer-revenue-analysis-sql-tableau.streamlit.app
 
 ### Insights
 1. **VIP Customers** - High-spending, frequent renters identified for loyalty programs.  
