@@ -1,37 +1,66 @@
 # app.py
 import os
 import re
-import io
-import json
-from typing import Dict, List, Tuple
+from pathlib import Path
 
 import pandas as pd
 import streamlit as st
-import altair as alt
 
-# =========================
-# Page setup
-# =========================
-st.set_page_config(page_title="Customer Revenue Analysis – Data Visualization", layout="wide")
-st.title("Customer Revenue Analysis — Data Visualization")
+# --------- App config ---------
+st.set_page_config(
+    page_title="Customer Revenue Analysis — Interactive Data Visualization",
+    layout="wide",
+)
+
+st.title("Customer Revenue Analysis — Interactive Data Visualization")
 st.caption("Browse query outputs, filter data, view SQL, and generate quick interactive charts.")
 
-# =========================
-# Config
-# =========================
-DATA_DIR = "data"                   # where q1.csv ... q11.csv live
-SQL_FILE = "queries_shan.sql"       # your SQL file with query blocks
-CSV_PATTERN = r"^q(\d+)\.csv$"      # q1.csv, q2.csv, ...
+# --------- Paths ---------
+REPO_ROOT = Path(__file__).parent if "__file__" in globals() else Path(".")
+DATA_DIR = REPO_ROOT / "data"            # expects q1.csv ... qN.csv
+SQL_FILE = REPO_ROOT / "queries_shan.sql"
 
-# =========================
-# Helpers
-# =========================
-def make_pretty_unique_columns(cols: List[str]) -> List[str]:
-    """Title-case columns and ensure uniqueness with friendly suffixes."""
-    pretty = [c.replace("_", " ").strip().title() for c in cols]
+# --------- Helpers ---------
+# Accepts any of:
+#   -- Query 1: Title
+#   -- [Query 1]: Title
+#   -- [Query 1] Title
+SQL_BLOCK_RE = re.compile(
+    r"""^\s*--\s*\[?\s*Query\s*(?P<num>\d+)\s*\]?\s*:?\s*(?P<title>.*)\s*$""",
+    re.IGNORECASE | re.MULTILINE,
+)
+
+def parse_sql_blocks(sql_text: str):
+    """
+    Returns ordered list of dicts: {num:int, title:str, body:str}
+    Headers supported:
+      -- Query 1: Title
+      -- [Query 1]: Title
+      -- [Query 1] Title
+    """
+    headers = [(m.start(), m.end(), int(m.group("num")), (m.group("title") or "").strip())
+               for m in SQL_BLOCK_RE.finditer(sql_text)]
+    blocks = []
+    for i, (s, e, num, title) in enumerate(headers):
+        body_end = headers[i + 1][0] if i + 1 < len(headers) else len(sql_text)
+        body = sql_text[e:body_end].strip()
+        blocks.append({"num": num, "title": title or f"Query {num}", "body": body})
+    blocks.sort(key=lambda x: x["num"])
+    return blocks
+
+@st.cache_data(show_spinner=False)
+def load_sql_blocks(sql_path: Path):
+    if not sql_path.exists():
+        return []
+    text = sql_path.read_text(encoding="utf-8", errors="ignore")
+    return parse_sql_blocks(text)
+
+def _dedupe_columns(cols):
+    """Ensure unique column names (prevents Altair/Streamlit errors)."""
     seen = {}
     out = []
-    for name in pretty:
+    for c in cols:
+        name = str(c)
         if name not in seen:
             seen[name] = 1
             out.append(name)
@@ -40,201 +69,187 @@ def make_pretty_unique_columns(cols: List[str]) -> List[str]:
             out.append(f"{name} ({seen[name]})")
     return out
 
-@st.cache_data
-def load_csv(path: str) -> pd.DataFrame:
-    df = pd.read_csv(path)
-    df.columns = make_pretty_unique_columns(df.columns)
+@st.cache_data(show_spinner=False)
+def load_csv(path: Path):
+    df = pd.read_csv(path, low_memory=False)
+    if df.columns.duplicated().any():
+        df.columns = _dedupe_columns(df.columns)
     return df
 
-def list_query_csvs(data_dir: str) -> List[Tuple[int, str]]:
-    """Return list of (query_number, filename) sorted by number."""
-    items = []
-    if not os.path.isdir(data_dir):
-        return items
-    for f in os.listdir(data_dir):
-        m = re.match(CSV_PATTERN, f, flags=re.IGNORECASE)
-        if m:
-            items.append((int(m.group(1)), f))
-    items.sort(key=lambda x: x[0])
-    return items
-
-@st.cache_data
-def parse_sql_blocks(sql_text: str) -> Dict[int, str]:
-    """
-    Parse SQL file with blocks like:
-    -- [Query 1] A title...
-    SELECT ...
-    -- [Query 2] Another title...
-    """
-    blocks = {}
-    current_idx = None
-    current_lines = []
-
-    header_pat = re.compile(r"^\s*--\s*\[Query\s*(\d+)\b.*\]", re.IGNORECASE)
-
-    for line in sql_text.splitlines():
-        m = header_pat.match(line)
-        if m:
-            if current_idx is not None and current_lines:
-                blocks[current_idx] = "\n".join(current_lines).strip()
-            current_idx = int(m.group(1))
-            current_lines = []
-        else:
-            if current_idx is not None:
-                current_lines.append(line)
-    if current_idx is not None and current_lines:
-        blocks[current_idx] = "\n".join(current_lines).strip()
-
-    return blocks
-
-@st.cache_data
-def read_sql_file(path: str) -> str:
-    if not os.path.exists(path):
-        return ""
-    with open(path, "r", encoding="utf-8") as f:
-        return f.read()
-
-def safe_numeric_slider(label: str, col: pd.Series) -> Tuple[float, float]:
-    """
-    Slider that won’t crash when min==max.
-    Returns (min_val, max_val) chosen.
-    When constant, returns (v, v) and shows a disabled slider substitute.
-    """
-    vmin = float(col.min())
-    vmax = float(col.max())
-    if vmin == vmax:
-        st.caption(f"“{label}” is constant ({vmin}). No range filter applied.")
-        return vmin, vmax
-    return st.slider(label, min_value=vmin, max_value=vmax, value=(vmin, vmax))
-
-def apply_text_search(df: pd.DataFrame, search: str) -> pd.DataFrame:
+def filter_df(df: pd.DataFrame, search: str) -> pd.DataFrame:
     if not search:
         return df
-    search = search.strip().lower()
-    mask = pd.Series([False] * len(df))
-    for c in df.columns:
-        # Convert to string to avoid errors
-        col = df[c].astype(str).str.lower()
-        mask = mask | col.str.contains(re.escape(search), na=False)
-    return df[mask]
+    s = search.strip().lower()
+    if not s:
+        return df
+    return df[df.apply(lambda row: row.astype(str).str.lower().str.contains(s, na=False).any(), axis=1)]
 
-def quick_chart(df: pd.DataFrame, x_col: str, y_col: str, color_col: str = None, chart_type: str = "Bar"):
-    chart_df = df[[x_col, y_col] + ([color_col] if color_col else [])].dropna()
-    if chart_type == "Bar":
-        ch = alt.Chart(chart_df).mark_bar().encode(
-            x=alt.X(x_col, sort='-y'),
-            y=y_col,
-            color=color_col if color_col else alt.value(None),
-            tooltip=list(chart_df.columns)
-        ).interactive()
-    elif chart_type == "Line":
-        ch = alt.Chart(chart_df).mark_line(point=True).encode(
-            x=x_col, y=y_col,
-            color=color_col if color_col else alt.value(None),
-            tooltip=list(chart_df.columns)
-        ).interactive()
-    elif chart_type == "Scatter":
-        ch = alt.Chart(chart_df).mark_circle().encode(
-            x=x_col, y=y_col,
-            color=color_col if color_col else alt.value(None),
-            tooltip=list(chart_df.columns),
-            size=alt.value(80)
-        ).interactive()
-    else:
-        ch = alt.Chart(chart_df).mark_bar().encode(
-            x=alt.X(x_col, sort='-y'),
-            y=y_col,
-            tooltip=list(chart_df.columns)
-        ).interactive()
+def is_numeric(series: pd.Series) -> bool:
+    return pd.api.types.is_numeric_dtype(series)
 
-    st.altair_chart(ch, use_container_width=True)
+def safe_number_slider(label, min_val, max_val, value):
+    """Avoid Streamlit slider crash when min == max."""
+    if pd.isna(min_val) or pd.isna(max_val):
+        st.info(f"{label}: no numeric data to filter.")
+        return value
+    if float(min_val) == float(max_val):
+        st.info(f"{label}: single value ({min_val}) — no range filter applied.")
+        return (float(min_val), float(max_val))
+    return st.slider(label, float(min_val), float(max_val), (float(value[0]), float(value[1])))
 
-# =========================
-# Load SQL
-# =========================
-raw_sql = read_sql_file(SQL_FILE)
-sql_blocks = parse_sql_blocks(raw_sql) if raw_sql else {}
+# --------- Load SQL metadata ---------
+sql_blocks = load_sql_blocks(SQL_FILE)
 
-# =========================
-# Sidebar
-# =========================
-st.sidebar.header("Select a Query")
+# If no blocks were parsed, fall back to generic names for q1..qN present
+fallback_blocks = []
 
-csvs = list_query_csvs(DATA_DIR)
-if not csvs:
-    st.sidebar.error(f"No CSVs found in `{DATA_DIR}/`. Add q1.csv, q2.csv, …")
+# Build available queries based on CSV files present
+available = []
+if DATA_DIR.exists():
+    for f in sorted(DATA_DIR.glob("q*.csv"), key=lambda p: int(re.sub(r"\D", "", p.stem) or 0)):
+        try:
+            num = int(re.sub(r"\D", "", f.stem))
+        except Exception:
+            continue
+        # find block for this num
+        blk = next((b for b in sql_blocks if b["num"] == num), None)
+        title = (blk["title"] if blk and blk.get("title") else f"Query {num}")
+        body = (blk["body"] if blk and blk.get("body") else "")
+        available.append({"num": num, "title": title, "csv": f, "sql": body})
+
+if not available:
+    st.error(
+        "No query outputs found. Please add CSVs to the `data/` folder (e.g., `q1.csv`, `q2.csv`…) "
+        "and ensure `queries_shan.sql` includes headers like `-- Query 1: Your Title`."
+    )
     st.stop()
 
-# Build labels “Query 1”, “Query 2”, …
-labels = [f"Query {idx}" for idx, _ in csvs]
-selection = st.sidebar.selectbox("Query", labels, index=0)
-selected_idx = csvs[labels.index(selection)][0]
-selected_csv = csvs[labels.index(selection)][1]
-selected_path = os.path.join(DATA_DIR, selected_csv)
+# --------- Sidebar ---------
+with st.sidebar:
+    st.subheader("Select Query")
+    labels = [f"Query {q['num']}: {q['title']}" for q in available]
+    pick_label = st.selectbox("Query output", labels)
+    picked = available[labels.index(pick_label)]
 
-# =========================
-# Load DataFrame
-# =========================
-df = load_csv(selected_path)
+    st.markdown("---")
+    st.caption("Use the controls below to filter and visualize the selected query.")
 
-# =========================
-# Main — Data / Filters / Chart / SQL
-# =========================
-st.subheader(f"{selection}")
+# --------- Load chosen CSV ---------
+df = load_csv(picked["csv"])
+st.markdown(f"### {pick_label}")
 
-# Search
-with st.expander("Search & Filter", expanded=True):
-    search_text = st.text_input("Search across all columns", placeholder="Type to filter rows…")
-    filtered = apply_text_search(df, search_text)
+# --------- Top info row ---------
+c1, c2, c3, c4 = st.columns([2, 2, 2, 3])
+with c1:
+    st.metric("Rows", f"{len(df):,}")
+with c2:
+    st.metric("Columns", f"{df.shape[1]:,}")
+with c3:
+    st.metric("File", picked["csv"].name)
 
-    # Optional: quick numeric sliders for top 2 numeric columns (robust to constant values)
-    num_cols = [c for c in filtered.columns if pd.api.types.is_numeric_dtype(filtered[c])]
-    if num_cols:
-        st.markdown("**Quick numeric range filters**")
-        # Limit to at most 2 sliders to keep UI simple
-        for i, c in enumerate(num_cols[:2]):
-            vmin, vmax = safe_numeric_slider(c, filtered[c])
-            if vmin != vmax:  # Only filter if there’s a real range
-                filtered = filtered[(filtered[c] >= vmin) & (filtered[c] <= vmax)]
+with c4:
+    search = st.text_input("Search across all columns", placeholder="Type to filter…")
 
-    # Show table
-    st.dataframe(filtered, use_container_width=True)
+df_filtered = filter_df(df, search)
 
-# Quick chart builder
-with st.expander("Quick Interactive Chart", expanded=True):
-    # Pick X/Y
-    x_opt = st.selectbox("X axis", options=list(filtered.columns), index=0, key="x_axis")
-    # Try to select a numeric default for Y
-    y_default_candidates = [c for c in filtered.columns if pd.api.types.is_numeric_dtype(filtered[c])]
-    y_default = y_default_candidates[0] if y_default_candidates else filtered.columns[-1]
-    y_opt = st.selectbox("Y axis", options=list(filtered.columns), index=list(filtered.columns).index(y_default), key="y_axis")
-    color_opt = st.selectbox("Color (optional)", options=["None"] + list(filtered.columns), index=0, key="color_axis")
-    chart_type = st.radio("Chart type", options=["Bar", "Line", "Scatter"], horizontal=True)
+# --------- Numeric filters (optional, dynamic) ---------
+st.markdown("#### Quick Filters")
+num_cols = [c for c in df_filtered.columns if is_numeric(df_filtered[c])]
+if num_cols:
+    with st.expander("Numeric range filters (optional)"):
+        for col in num_cols:
+            ser = pd.to_numeric(df_filtered[col], errors="coerce")
+            col_min, col_max = float(ser.min()), float(ser.max())
+            chosen_min, chosen_max = safe_number_slider(
+                f"{col} range",
+                col_min,
+                col_max,
+                (col_min, col_max),
+            )
+            if col_min != col_max:
+                ser2 = pd.to_numeric(df_filtered[col], errors="coerce")
+                df_filtered = df_filtered[(ser2 >= chosen_min) & (ser2 <= chosen_max)]
+else:
+    st.info("No numeric columns detected for range filtering.")
 
-    if x_opt and y_opt:
-        color_arg = None if color_opt == "None" else color_opt
-        try:
-            quick_chart(filtered, x_opt, y_opt, color_arg, chart_type)
-        except Exception as e:
-            st.warning(f"Chart could not be rendered: {e}")
+# --------- Data preview ---------
+st.markdown("#### Data Preview")
+st.dataframe(df_filtered.head(100), use_container_width=True)
 
-# SQL viewer
-with st.expander("View SQL", expanded=False):
-    if sql_blocks and selected_idx in sql_blocks:
-        st.code(sql_blocks[selected_idx], language="sql")
-    elif raw_sql:
-        # Fallback when blocks not found: show entire file once
-        st.info("No block header found for this query. Showing entire SQL file.")
-        st.code(raw_sql, language="sql")
+# --------- Quick Chart Builder ---------
+st.markdown("#### Quick Interactive Chart")
+chart_cols_left, chart_cols_right = st.columns([3, 2])
+
+with chart_cols_left:
+    x_col = st.selectbox("X-axis", options=list(df_filtered.columns), index=0)
+    y_candidates = [c for c in df_filtered.columns if is_numeric(df_filtered[c])]
+    if not y_candidates:
+        st.info("No numeric columns available for Y-axis.")
+        y_col = None
     else:
-        st.write("No SQL file found.")
+        # prefer common revenue-ish columns, else first numeric
+        pref = {"total_revenue", "revenue", "amount", "avg_spending_per_rental", "total_late_fees"}
+        idx = 0
+        for i, c in enumerate(y_candidates):
+            if c.lower() in pref:
+                idx = i
+                break
+        y_col = st.selectbox("Y-axis (numeric)", options=y_candidates, index=idx)
 
-# Download filtered data
-with st.expander("Download", expanded=False):
-    csv_bytes = filtered.to_csv(index=False).encode("utf-8")
-    st.download_button(
-        "Download filtered data (CSV)",
-        data=csv_bytes,
-        file_name=f"{selection.lower().replace(' ', '_')}.csv",
-        mime="text/csv",
+with chart_cols_right:
+    chart_type = st.selectbox("Chart type", ["Bar", "Line", "Area", "Scatter"])
+    color_col = st.selectbox(
+        "Color by (optional)",
+        options=["(none)"] + [c for c in df_filtered.columns if c != x_col],
+        index=0
     )
+
+if y_col:
+    try:
+        import altair as alt
+        data = df_filtered[[x_col, y_col] + ([] if color_col == "(none)" else [color_col])].copy()
+
+        # keep ordering sensible for categorical x; limit cardinality
+        if not is_numeric(data[x_col]) and data[x_col].nunique() > 50:
+            top_vals = data[x_col].value_counts().nlargest(50).index
+            data = data[data[x_col].isin(top_vals)]
+
+        if chart_type == "Bar":
+            mark = alt.Chart(data).mark_bar()
+        elif chart_type == "Line":
+            mark = alt.Chart(data).mark_line(point=True)
+        elif chart_type == "Area":
+            mark = alt.Chart(data).mark_area()
+        else:
+            mark = alt.Chart(data).mark_circle(size=60)
+
+        enc = mark.encode(
+            x=alt.X(x_col, sort=None),
+            y=alt.Y(y_col),
+            tooltip=list(data.columns)
+        )
+        if color_col != "(none)":
+            enc = enc.encode(color=color_col)
+
+        st.altair_chart(enc.properties(height=380, width="container"), use_container_width=True)
+    except Exception as e:
+        st.warning(f"Chart could not be rendered: {e}")
+
+# --------- SQL Viewer ---------
+with st.expander("View SQL for this query"):
+    sql_body = (picked.get("sql") or "").strip()
+    if sql_body:
+        sql_body = re.sub(r"\n{3,}", "\n\n", sql_body)
+        st.code(sql_body, language="sql")
+    else:
+        st.info("No SQL block found in `queries_shan.sql` for this query number.")
+
+# --------- Downloads ---------
+st.markdown("#### Download")
+csv_bytes = df_filtered.to_csv(index=False).encode("utf-8")
+st.download_button(
+    "⬇️ Download filtered CSV",
+    data=csv_bytes,
+    file_name=f"query_{picked['num']}_filtered.csv",
+    mime="text/csv",
+)
