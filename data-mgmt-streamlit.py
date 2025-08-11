@@ -101,7 +101,7 @@ if not available:
     )
     st.stop()
 
-# --------- Sidebar: query picker ---------
+# --------- Sidebar ---------
 with st.sidebar:
     st.subheader("Select Query")
     options = {f"Query {q['num']}: {q['title']}": q for q in available}
@@ -125,8 +125,8 @@ with c4:
 
 df_filtered = filter_df(df, search)
 
-# --------- Numeric filters (dynamic) ---------
-st.markdown("#### Numeric range filters")
+# --------- Numeric filters ---------
+st.markdown("#### Numeric Range Filters")
 num_cols = [c for c in df_filtered.columns if is_numeric(df_filtered[c])]
 if num_cols:
     with st.expander("Show/hide numeric filters", expanded=False):
