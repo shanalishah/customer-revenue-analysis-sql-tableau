@@ -43,98 +43,102 @@ GROUP BY c.customer_id, Customer_Name, ci.city, co.country;
 
 SELECT * FROM customer_revenue_summary;
 
--- QUERIES
-
--- 1 Top 10 Revenue-Generating Customers
-SELECT Customer_Name, Total_Revenue
+-- Query 1: Top 10 Revenue-Generating Customers
+SELECT
+  Customer_Name,
+  Total_Revenue
 FROM customer_revenue_summary
 ORDER BY Total_Revenue DESC
-;
+LIMIT 10;
 
--- 2 Most Frequent Renters
- SELECT Customer_Name, Total_Rentals
- FROM customer_revenue_summary
- ORDER BY Total_Rentals DESC
- ;
-
--- 3 Customers Paying the Most Late Fees
-SELECT Customer_Name, Total_Late_Fees
+-- Query 2: Most Frequent Renters
+SELECT
+  Customer_Name,
+  Total_Rentals
 FROM customer_revenue_summary
-ORDER BY Total_Late_Fees DESC
-;
+ORDER BY Total_Rentals DESC;
 
--- 4 Rental Frequency Segmentation
-SELECT 
-    CASE 
-        WHEN Total_Rentals >= 20 THEN 'Frequent Renters'
-        WHEN Total_Rentals BETWEEN 10 AND 19 THEN 'Regular Renters'
-        ELSE 'Occasional Renters'
-    END AS Rental_Frequency_Group,
-    COUNT(Customer_ID) AS Customer_Count,
-    ROUND(SUM(Total_Revenue), 2) AS Total_Revenue
+-- Query 3: Customers Paying the Most Late Fees
+SELECT
+  Customer_Name,
+  Total_Late_Fees
+FROM customer_revenue_summary
+ORDER BY Total_Late_Fees DESC;
+
+-- Query 4: Rental Frequency Segmentation
+SELECT
+  CASE
+    WHEN Total_Rentals >= 20 THEN 'Frequent Renters'
+    WHEN Total_Rentals BETWEEN 10 AND 19 THEN 'Regular Renters'
+    ELSE 'Occasional Renters'
+  END AS Rental_Frequency_Group,
+  COUNT(Customer_ID) AS Customer_Count,
+  ROUND(SUM(Total_Revenue), 2) AS Total_Revenue
 FROM customer_revenue_summary
 GROUP BY Rental_Frequency_Group
 ORDER BY Total_Revenue DESC;
 
--- 5 Customers at Risk of Churn
-SELECT Customer_Name, Last_Rental_Date
+-- Query 5: Customers at Risk of Churn (inactive > 6 months)
+SELECT
+  Customer_Name,
+  Last_Rental_Date
 FROM customer_revenue_summary
-HAVING Last_Rental_Date < DATE_SUB(CURDATE(), INTERVAL 6 MONTH)
-ORDER BY Last_Rental_Date ASC
-;
+WHERE Last_Rental_Date < DATE_SUB(CURDATE(), INTERVAL 6 MONTH)
+ORDER BY Last_Rental_Date ASC;
 
--- 6 Revenue Breakdown by Most Watched Category
-SELECT Most_Frequent_Category, 
-       COUNT(Customer_ID) AS Customers_Who_Rent_This_Genre, 
-       ROUND(SUM(Total_Revenue), 2) AS Total_Revenue
+-- Query 6: Revenue Breakdown by Most Watched Category
+SELECT
+  Most_Frequent_Category,
+  COUNT(Customer_ID) AS Customers_Who_Rent_This_Genre,
+  ROUND(SUM(Total_Revenue), 2) AS Total_Revenue
 FROM customer_revenue_summary
 GROUP BY Most_Frequent_Category
 ORDER BY Total_Revenue DESC;
 
--- 7 Customer Lifetime Value
-SELECT Customer_Name, 
-       First_Rental_Date, 
-       Last_Rental_Date, 
-       ROUND(SUM(Total_Revenue), 2) AS Lifetime_Spending
+-- Query 7: Customer Lifetime Value (CLV)
+SELECT
+  Customer_Name,
+  First_Rental_Date,
+  Last_Rental_Date,
+  ROUND(SUM(Total_Revenue), 2) AS Lifetime_Spending
 FROM customer_revenue_summary
 GROUP BY Customer_Name, First_Rental_Date, Last_Rental_Date
-ORDER BY Lifetime_Spending DESC
-;
+ORDER BY Lifetime_Spending DESC;
 
--- 8 Customer Growth Over Time
-SELECT DATE_FORMAT(First_Rental_Date, '%Y-%m') AS Customer_Cohort, 
-       COUNT(Customer_ID) AS New_Customers, 
-       ROUND(SUM(Total_Revenue), 2) AS Total_Revenue
+-- Query 8: Customer Growth Over Time (cohorts by first rental month)
+SELECT
+  DATE_FORMAT(First_Rental_Date, '%Y-%m') AS Customer_Cohort,
+  COUNT(Customer_ID) AS New_Customers,
+  ROUND(SUM(Total_Revenue), 2) AS Total_Revenue
 FROM customer_revenue_summary
 GROUP BY Customer_Cohort
 ORDER BY Customer_Cohort;
 
--- 9 Revenue by Country
-SELECT 
-    Customer_Country AS Country, 
-    COUNT(Customer_ID) AS Total_Customers, 
-    ROUND(SUM(Total_Revenue), 2) AS Total_Revenue
+-- Query 9: Revenue by Country
+SELECT
+  Customer_Country AS Country,
+  COUNT(Customer_ID) AS Total_Customers,
+  ROUND(SUM(Total_Revenue), 2) AS Total_Revenue
 FROM customer_revenue_summary
 GROUP BY Customer_Country
 ORDER BY Total_Revenue DESC;
 
--- 10 Revenue by City
-SELECT 
-    Customer_City AS City, 
-    Customer_Country AS Country, 
-    COUNT(Customer_ID) AS Total_Customers, 
-    ROUND(SUM(Total_Revenue), 2) AS Total_Revenue
+-- Query 10: Revenue by City
+SELECT
+  Customer_City AS City,
+  Customer_Country AS Country,
+  COUNT(Customer_ID) AS Total_Customers,
+  ROUND(SUM(Total_Revenue), 2) AS Total_Revenue
 FROM customer_revenue_summary
 GROUP BY Customer_City, Customer_Country
-ORDER BY Total_Revenue DESC
-;
+ORDER BY Total_Revenue DESC;
 
--- 11 Average Spending Per Customer by Country
-SELECT 
-    Customer_Country AS Country, 
-    COUNT(Customer_ID) AS Total_Customers, 
-    ROUND(SUM(Total_Revenue), 2) AS Total_Revenue,
-    ROUND(SUM(Total_Revenue) / COUNT(Customer_ID), 2) AS Avg_Revenue_Per_Customer
+-- Query 11: Average Spending Per Customer by Country
+SELECT
+  Customer_Country AS Country,
+  COUNT(Customer_ID) AS Total_Customers,
+  ROUND(SUM(Total_Revenue), 2) AS Total_Revenue,
+  ROUND(SUM(Total_Revenue) / COUNT(Customer_ID), 2) AS Avg_Revenue_Per_Customer
 FROM customer_revenue_summary
 GROUP BY Customer_Country
 ORDER BY Avg_Revenue_Per_Customer DESC;
