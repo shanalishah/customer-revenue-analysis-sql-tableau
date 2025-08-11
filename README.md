@@ -34,8 +34,7 @@ The SQL view `customer_revenue_summary` aggregates:
 5. **Top Genres by Revenue** – Most profitable genres per country and overall.
 
 ## 📷 Visualizations
-*(Replace with actual image paths)*  
-![Global Revenue Map](images/global_revenue.png)  
+![Global Revenue Map](<img width="1326" height="1029" alt="Graph1" src="https://github.com/user-attachments/assets/cd9c7eb2-b1b8-459a-b265-9891a71108bb" />)
 ![Genre Revenue Bubble Chart](images/genre_revenue.png)  
 ![Dashboard](images/dashboard.png)  
 
