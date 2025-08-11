@@ -1,17 +1,11 @@
-# Customer Revenue Analysis - SQL & Tableau
+# Customer Revenue Analysis - SQL, Tableau & Streamlit
 
 ## Overview
-This project analyzes customer behavior and revenue trends for a **DVD rental company** using the Sakila sample database.  
-The goal was to design and implement a **Customer Revenue Data Warehouse** in MySQL and visualize insights in **Tableau** for data-driven decision-making.
-
-## Analysis & Insights
-The SQL view `customer_revenue_summary` aggregates:
-- Total rentals & revenue per customer  
-- Average spending per rental  
-- Most frequent movie category  
-- Total late fees  
-- First & last rental dates  
-- Customer location  
+This project analyzes customer behavior and revenue trends for a **DVD rental company**.  
+It includes:
+- A MySQL analytical view (`customer_revenue_summary`) aggregating rentals, revenue, fees, and geography.
+- Tableau visuals for executive insights.
+- An interactive **Streamlit** app to browse query outputs, filter, chart, and download data.
 
 ### Insights
 1. **VIP Customers** - High-spending, frequent renters identified for loyalty programs.  
